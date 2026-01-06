@@ -8,17 +8,28 @@
 #include <stdint.h>
 
 #define BOARDSIZE 3
+
+// Holds instance of game.
+typedef struct game {
+    char board[BOARDSIZE*BOARDSIZE];
+    int turn;
+    int status;
+} game;
+
+// -------------------------------GAME STUFF ----------------------------------
 // These all need to move to a game section or struct or idk... somewhere.
-char board[BOARDSIZE*BOARDSIZE] = {0};
-int number_of_players = 0;
-int turn = 0;
+char BOARD[BOARDSIZE*BOARDSIZE] = {0};
+int NUM_PLAYERS = 0;
+int TURN = 0;
+char STATUS = 'N';
 
 /* Checks if the game is over and returns the winner player if so */
 int gameover(char *b) {
     for (int i = 0; i < BOARDSIZE; i++) {
         int row = i*BOARDSIZE;
         // Row 
-        if (row % BOARDSIZE == 0 && b[row] != 0 && b[row] == b[row+1] && b[row] == b[row+2])
+        // if (row % BOARDSIZE == 0 && b[row] != 0 && b[row] == b[row+1] && b[row] == b[row+2])
+        if (b[i*BOARDSIZE] != 0 && b[i*BOARDSIZE] == b[i*BOARDSIZE +1] && b[i*BOARDSIZE] == b[i*BOARDSIZE+2])
             return b[i];
             // Columns
         else if (b[i] != 0 && b[i] == b[i + BOARDSIZE] && b[i] == b[i + (2*BOARDSIZE)])
@@ -60,21 +71,13 @@ void print_board(char *board) {
     }
 }
 
-/* Resets a board for a new game*/
-void reset_board(char *board) {
-    for (int i = 0; i < BOARDSIZE*BOARDSIZE; i++) 
-        board[i] = 0;
+void reset_game() {
+    memset(&BOARD, 0, sizeof(BOARD));
+    NUM_PLAYERS--;
+    TURN = 0;
 }
 
-char *serailize_board(char *board) {
-    char *seralized = malloc(BOARDSIZE*BOARDSIZE + 1);
-    int i;
-    for (i = 0; i < BOARDSIZE*BOARDSIZE; i++)
-        seralized[i] = '0' + board[i];
-    seralized[i] = '\0';
-    return seralized;
-}
-
+// -------------------------------NETWORKING STUFF -----------------------------
 ssize_t send_all(int sock, const void *buf, size_t len) {
     size_t total = 0;
     const char *p = buf;
@@ -99,12 +102,21 @@ ssize_t recv_all(int sock, void *buf, size_t len) {
     return total;
 } 
 
-void send_board(int socket, char *board, char status, int you, int turn) {
+char *serailize_board(char *board) {
+    char *seralized = malloc(BOARDSIZE*BOARDSIZE + 1);
+    int i;
+    for (i = 0; i < BOARDSIZE*BOARDSIZE; i++)
+        seralized[i] = '0' + board[i];
+    seralized[i] = '\0';
+    return seralized;
+}
+
+void send_board(int socket, char *board, int you) {
     char payload[100];
     char *serial_killer = serailize_board(board);
     int payload_len = snprintf(payload, sizeof(payload), 
                                "STATUS=%c YOU=%d TURN=%d BOARD=%s", 
-                               status, you, turn, serial_killer);
+                               STATUS, you, TURN, serial_killer);
 
     uint32_t header = htonl(payload_len);
     send_all(socket, &header, sizeof header);
@@ -169,48 +181,38 @@ int server_accept(int listen_sock, fd_set *master, int *max) {
     // Add the client to the master socket set
     FD_SET(client_socket, master);
     if (client_socket > *max) *max = client_socket;
-    number_of_players++;
+    NUM_PLAYERS++;
 
-    char addrbuf[100];
-    char portbuf[100];
+    char addrbuf[100], portbuf[100];
     getnameinfo((struct sockaddr*)&client_address, client_len, 
                 addrbuf, sizeof(addrbuf), portbuf, sizeof(portbuf),
                 NI_NUMERICHOST | NI_NUMERICSERV);
     printf("Client connected from address %s:%s\n", addrbuf, portbuf);
-    // Client setup finished
 
-    // STATUS | NUM PLAYERS | PLAYER NUM | TURN | BOARD
-    // WAIT   | 1           | 1          | 0    | 001020201
-
-    //setup game
-    if (number_of_players == 1) {
-        turn = 0;
-        send_board(client_socket, board, 'N', number_of_players, turn);
-    }
+    // POSSIBLE SPLIT OF FUNCTION HERE
+    // Set up game for client 
+    if (NUM_PLAYERS == 1) 
+        send_board(client_socket, BOARD, NUM_PLAYERS);
     else {
-        turn = 1;
-        send_board(client_socket, board, 'S', number_of_players, turn);
+        TURN = 1;
+        STATUS = 'S';    // Start
+        send_board(client_socket, BOARD, NUM_PLAYERS);
 
         // Start game for first player that connected
         for (int j = 1; j <= *max; ++j) 
-            if (j != listen_sock && j != client_socket) {
-                turn = 1;
-                send_board(j, board, 'S', 3, turn);
-            }
+            if (j != listen_sock && j != client_socket) 
+                send_board(j, BOARD, 3);
     }
     return 0;
 }
 
-void server_handle_client(int listen_sock, int fd, fd_set *master, int max) {
+void handle_client_req(int listen_sock, int fd, fd_set *master, int max) {
     char buf[5];
     int bytes = recv(fd, buf, sizeof buf-1, 0);
     buf[bytes] = '\0';
     if (bytes < 1) {
         printf("Client has disconnected.\n");
-        number_of_players--;
-        turn = 0;
-        reset_board(board);
-        // Reset board
+        reset_game();
         FD_CLR(fd, master);
         close(fd);
     }
@@ -218,36 +220,25 @@ void server_handle_client(int listen_sock, int fd, fd_set *master, int max) {
     printf("%.*s\n", bytes, buf);
     int r, c;
 
-    if (!is_valid(board, buf, &r, &c)) {
-        printf("Move is invalid dawg\n");
-        // Resend request to same player
-        send_board(fd, board, 'S', 3, turn);
+    // Return straight away if invalid move.
+    if (!is_valid(BOARD, buf, &r, &c)) {
+        printf("Move is invalid, try again\n");
+        send_board(fd, BOARD, 3);
+        return;
     }
-    else {  
-        board[r*BOARDSIZE + c] = turn;
-        print_board(board);
 
-        if (gameover(board)) {
-            send_board(fd, board, 'F', 3, turn);
+    // Mutate the board with the players move
+    BOARD[r*BOARDSIZE + c] = TURN;
+    print_board(BOARD);
 
-            for (int k=0; k<=max; ++k) {
-                if (k == listen_sock) 
-                    continue;
-                send_board(k, board, 'F', 3, turn);
-            }
-        }
-        else  {
-            turn = (turn == 1) ? 2 : 1;
-            send_board(fd, board, 'S', 3, turn);
+    if (gameover(BOARD)) STATUS = 'F';        // Finished
+    else TURN = (TURN == 1) ? 2 : 1;          // Switch player turn
+    
+    // send_board(fd, BOARD, 3);                 // Send to player whose turn it is
 
-            for (int k=0; k<=max; ++k) {
-                // skip the servers listening socket
-                if (k == listen_sock) 
-                    continue;
-                send_board(k, board, 'S', 3, turn);
-            }
-        }
-    }
+    for (int i=0; i<=max; ++i) 
+        if (i != listen_sock) 
+            send_board(i, BOARD, 3);
 }
 
 int run_server(int listen_sock) {
@@ -269,7 +260,7 @@ int run_server(int listen_sock) {
             if (fd == listen_sock) 
                 server_accept(listen_sock, &master, &max_sock);
             else 
-                server_handle_client(listen_sock, fd, &master, max_sock);
+                handle_client_req(listen_sock, fd, &master, max_sock);
         }
     }
 }
