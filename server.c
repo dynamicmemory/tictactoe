@@ -11,17 +11,22 @@
 
 // Holds instance of game.
 typedef struct game {
-    char board[BOARDSIZE*BOARDSIZE];
+    // Might want an int array or malloc a char array here instead... unsure.
+    char *board;
     int turn;
     int status;
+    int num_players;
 } game;
 
+// TODO: Initialize game correctly
+void init_game(game *g) {
+    g->board = malloc(sizeof(char)*BOARDSIZE*BOARDSIZE);
+    g->turn = 0;
+    g->status = 0;
+    g->num_players = 0;
+}
+
 // -------------------------------GAME STUFF ----------------------------------
-// These all need to move to a game section or struct or idk... somewhere.
-char BOARD[BOARDSIZE*BOARDSIZE] = {0};
-int NUM_PLAYERS = 0;
-int TURN = 0;
-char STATUS = 'N';
 
 /* Checks if the game is over and returns the winner player if so */
 int gameover(char *b) {
@@ -71,10 +76,10 @@ void print_board(char *board) {
     }
 }
 
-void reset_game() {
-    memset(&BOARD, 0, sizeof(BOARD));
-    NUM_PLAYERS--;
-    TURN = 0;
+void reset_game(game *g) {
+    memset(&g->board, 0, sizeof(g->board));
+    g->num_players--;
+    g->turn = 0;
 }
 
 // -------------------------------NETWORKING STUFF -----------------------------
@@ -111,17 +116,38 @@ char *serailize_board(char *board) {
     return seralized;
 }
 
-void send_board(int socket, char *board, int you) {
+// TODO: We want to eliminate strings, struct -> bytes -> bytes -> struct eventually
+void send_board(int socket, game *g) {
     char payload[100];
-    char *serial_killer = serailize_board(board);
+    char *serial_killer = serailize_board(g->board);
     int payload_len = snprintf(payload, sizeof(payload), 
-                               "STATUS=%c YOU=%d TURN=%d BOARD=%s", 
-                               STATUS, you, TURN, serial_killer);
+                               "STATUS=%c TURN=%d BOARD=%s", 
+                               g->status, g->turn, serial_killer);
 
     uint32_t header = htonl(payload_len);
     send_all(socket, &header, sizeof header);
     send_all(socket, payload, payload_len);
     free(serial_killer);
+}
+
+void initialize_player(game *g, int listen_sock, int client_socket, int max) {
+    // Set up game for client 
+    g->num_players++;
+    if (g->num_players == 1) 
+        send_board(client_socket, g);
+    else {
+        g->turn = 1;    // ????
+        g->status = 'S';  // >>>>?????
+        send_board(client_socket, g);
+
+        // I THink on the refactor we wont need this, we just send to all and 
+        // the client will understand from the protocol we send, no unique id or 
+        // number of players or random number 3 to dictate its knowledge
+        // Start game for first player that connected
+        for (int j=1; j<=max; ++j) 
+            if (j != listen_sock && j != client_socket) 
+                send_board(j, g);
+    }
 }
 
 /* Initial setup for the server, returns a socket listening to the local host 
@@ -181,38 +207,24 @@ int server_accept(int listen_sock, fd_set *master, int *max) {
     // Add the client to the master socket set
     FD_SET(client_socket, master);
     if (client_socket > *max) *max = client_socket;
-    NUM_PLAYERS++;
 
     char addrbuf[100], portbuf[100];
     getnameinfo((struct sockaddr*)&client_address, client_len, 
                 addrbuf, sizeof(addrbuf), portbuf, sizeof(portbuf),
                 NI_NUMERICHOST | NI_NUMERICSERV);
     printf("Client connected from address %s:%s\n", addrbuf, portbuf);
-
-    // POSSIBLE SPLIT OF FUNCTION HERE
-    // Set up game for client 
-    if (NUM_PLAYERS == 1) 
-        send_board(client_socket, BOARD, NUM_PLAYERS);
-    else {
-        TURN = 1;
-        STATUS = 'S';    // Start
-        send_board(client_socket, BOARD, NUM_PLAYERS);
-
-        // Start game for first player that connected
-        for (int j = 1; j <= *max; ++j) 
-            if (j != listen_sock && j != client_socket) 
-                send_board(j, BOARD, 3);
-    }
-    return 0;
+    
+    return client_socket;
 }
 
-void handle_client_req(int listen_sock, int fd, fd_set *master, int max) {
+// MUTATES GAME STILL
+void handle_client_req(game *g, int listen_sock, int fd, fd_set *master, int max) {
     char buf[5];
     int bytes = recv(fd, buf, sizeof buf-1, 0);
     buf[bytes] = '\0';
     if (bytes < 1) {
         printf("Client has disconnected.\n");
-        reset_game();
+        reset_game(g);
         FD_CLR(fd, master);
         close(fd);
     }
@@ -221,27 +233,25 @@ void handle_client_req(int listen_sock, int fd, fd_set *master, int max) {
     int r, c;
 
     // Return straight away if invalid move.
-    if (!is_valid(BOARD, buf, &r, &c)) {
+    if (!is_valid(g->board, buf, &r, &c)) {
         printf("Move is invalid, try again\n");
-        send_board(fd, BOARD, 3);
+        send_board(fd, g);
         return;
     }
 
     // Mutate the board with the players move
-    BOARD[r*BOARDSIZE + c] = TURN;
-    print_board(BOARD);
+    g->board[r*BOARDSIZE + c] = g->turn;
+    print_board(g->board);
 
-    if (gameover(BOARD)) STATUS = 'F';        // Finished
-    else TURN = (TURN == 1) ? 2 : 1;          // Switch player turn
-    
-    // send_board(fd, BOARD, 3);                 // Send to player whose turn it is
+    if (gameover(g->board)) g->status = 'F';        // Finished
+    else g->turn = (g->turn == 1) ? 2 : 1;          // Switch player turn
 
     for (int i=0; i<=max; ++i) 
         if (i != listen_sock) 
-            send_board(i, BOARD, 3);
+            send_board(i, g);
 }
 
-int run_server(int listen_sock) {
+int run_server(game *g, int listen_sock) {
     fd_set master;
     FD_ZERO(&master);
     FD_SET(listen_sock, &master);
@@ -257,10 +267,12 @@ int run_server(int listen_sock) {
         for (int fd=0; fd<=max_sock; fd++) {
             if (!FD_ISSET(fd, &read_fds)) continue;
 
-            if (fd == listen_sock) 
-                server_accept(listen_sock, &master, &max_sock);
+            if (fd == listen_sock) { 
+                int new_client = server_accept(listen_sock, &master, &max_sock);
+                initialize_player(g, listen_sock, new_client, max_sock);
+            }
             else 
-                handle_client_req(listen_sock, fd, &master, max_sock);
+                handle_client_req(g, listen_sock, fd, &master, max_sock);
         }
     }
 }
@@ -277,7 +289,9 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    int server_exit = run_server(socket_listen);
+    game g;
+    init_game(&g);
+    int server_exit = run_server(&g, socket_listen);
     if (server_exit < 0) {
         printf("run_server crashed");
         return 1;

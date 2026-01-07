@@ -161,27 +161,28 @@ int handle_server_req(int server_sock) {
 }
 
 int run_client(int server_sock) {
-    fd_set reads;
-    FD_ZERO(&reads);
-    FD_SET(server_sock, &reads);
-    FD_SET(0, &reads);
+    fd_set master;
+    FD_ZERO(&master);
+    FD_SET(server_sock, &master);
+    FD_SET(0, &master);
 
     // struct timeval timeout;
     // timeout.tv_sec = 0;
     // timeout.tv_usec = 100000;
 
     while (1) {
-        if (select(server_sock+1, &reads, 0, 0, 0) < 0) {
+        fd_set read_fds = master;
+        if (select(server_sock+1, &read_fds, 0, 0, 0) < 0) {
             fprintf(stderr, "select failed (%d).\n", errno);
             return -1;
         }
 
-        if (FD_ISSET(0, &reads)) {
+        if (FD_ISSET(0, &read_fds)) {
             int i = 0;
         }
 
         // Recieved server message 
-        if (FD_ISSET(server_sock, &reads))
+        if (FD_ISSET(server_sock, &read_fds))
             handle_server_req(server_sock);
     }
     return 0;
