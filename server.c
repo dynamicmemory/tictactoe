@@ -1,3 +1,6 @@
+// NETWORK LAYER - Works in isolation, exposes network apis.  
+// GAME LAYER - Works in isolation, exposes game apis.
+// PROTOCOL LAYER - Composes both game and network apis to create the program.
 #include <stdio.h>
 #include <netdb.h>
 #include <unistd.h>
@@ -7,15 +10,104 @@
 #include <stdlib.h>
 #include <stdint.h>
 
+// -----------------------------NETWORK LAYER----------------------------------
+/* Initial setup for the server, returns a socket listening to the local host 
+ * at the port number provided. */
+int server_listen(const char *port) {
+    printf("Configuring server address...\n");
+    struct addrinfo hints;
+    struct addrinfo *bind_address;
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+
+    if (getaddrinfo(0, port, &hints, &bind_address)) {
+        fprintf(stderr, "getaddrinfo failed (%d).\n", errno);
+        return -1;
+    }
+
+    printf("Creating a socket for clients to connect too...\n");
+    int socket_listen = socket(bind_address->ai_family, 
+                               bind_address->ai_socktype,
+                               bind_address->ai_protocol);
+    if (socket_listen < 0) {
+        fprintf(stderr, "socket failed (%d).\n", errno);
+        return -1;
+    }
+
+    if (bind(socket_listen, bind_address->ai_addr, bind_address->ai_addrlen)) {
+        fprintf(stderr, "bind failed (%d).\n", errno);
+        return -1;
+    }
+
+    freeaddrinfo(bind_address);
+
+    printf("Server listening for new connections...\n");
+    if (listen(socket_listen, 2) < 0) {
+        fprintf(stderr, "listen failed (%d).\n", errno);
+        return -1;
+    }
+
+    return socket_listen;
+}
+
+int server_accept(int listen_sock) {
+    // Setup the new client
+    printf("New client connected, setting up socket...\n");
+    struct sockaddr client_address;
+    socklen_t client_len = sizeof(client_address);
+    int client_socket = accept(listen_sock, 
+                               (struct sockaddr*)&client_address, &client_len);
+
+    if (client_socket < 0) {
+        fprintf(stderr, "accept failed (%d).\n", errno);
+        return -1;
+    }
+    
+    char addrbuf[100], portbuf[100];
+    getnameinfo((struct sockaddr*)&client_address, client_len, 
+                addrbuf, sizeof(addrbuf), portbuf, sizeof(portbuf),
+                NI_NUMERICHOST | NI_NUMERICSERV);
+    printf("Client connected from address %s:%s\n", addrbuf, portbuf);
+    
+    return client_socket;
+}
+
+ssize_t send_all(int sock, const void *buf, size_t len) {
+    size_t total = 0;
+    const char *p = buf;
+
+    while (total < len) {
+        ssize_t n = send(sock, p+total, len-total, 0);
+        if (n <= 0) return -1;
+        total += n;
+    }
+    return total;
+}
+
+ssize_t recv_all(int sock, void *buf, size_t len) {
+    size_t total = 0;
+    char *p = buf;
+
+    while (total < len) {
+        ssize_t n = recv(sock, p+total, len-total, 0);
+        if (n <= 0) return -1;
+        total += n;
+    }
+    return total;
+} 
+
+// ------------------------------GAME LAYER------------------------------------
 #define BOARDSIZE 3
 
 // Holds instance of game.
 typedef struct game {
     // Might want an int array or malloc a char array here instead... unsure.
-    char *board;
-    int turn;
     int status;
-    int num_players;
+    int turn;
+    int *players[2];
+    char *board;
 } game;
 
 // TODO: Initialize game correctly
@@ -23,17 +115,13 @@ void init_game(game *g) {
     g->board = malloc(sizeof(char)*BOARDSIZE*BOARDSIZE);
     g->turn = 0;
     g->status = 0;
-    g->num_players = 0;
+    memset(&g->players, 0, sizeof(g->players));
 }
 
-// -------------------------------GAME STUFF ----------------------------------
-
+// TODO: LOGIC IS BROKEN
 /* Checks if the game is over and returns the winner player if so */
 int gameover(char *b) {
     for (int i = 0; i < BOARDSIZE; i++) {
-        int row = i*BOARDSIZE;
-        // Row 
-        // if (row % BOARDSIZE == 0 && b[row] != 0 && b[row] == b[row+1] && b[row] == b[row+2])
         if (b[i*BOARDSIZE] != 0 && b[i*BOARDSIZE] == b[i*BOARDSIZE +1] && b[i*BOARDSIZE] == b[i*BOARDSIZE+2])
             return b[i];
             // Columns
@@ -76,37 +164,24 @@ void print_board(char *board) {
     }
 }
 
+void mutate_game_state(void) { }
+
 void reset_game(game *g) {
     memset(&g->board, 0, sizeof(g->board));
     g->num_players--;
     g->turn = 0;
 }
 
-// -------------------------------NETWORKING STUFF -----------------------------
-ssize_t send_all(int sock, const void *buf, size_t len) {
-    size_t total = 0;
-    const char *p = buf;
+// ----------------------------PROTOCOL  LAYER---------------------------------
+// Defines the message protocol between the server and client 
+typedef struct message {
+    uint8_t status;
+    uint8_t you; 
+    uint8_t turn;
+    uint8_t board[9];
+} message;
 
-    while (total < len) {
-        ssize_t n = send(sock, p+total, len-total, 0);
-        if (n <= 0) return -1;
-        total += n;
-    }
-    return total;
-}
-
-ssize_t recv_all(int sock, void *buf, size_t len) {
-    size_t total = 0;
-    char *p = buf;
-
-    while (total < len) {
-        ssize_t n = recv(sock, p+total, len-total, 0);
-        if (n <= 0) return -1;
-        total += n;
-    }
-    return total;
-} 
-
+// TODO: We wont need this 
 char *serailize_board(char *board) {
     char *seralized = malloc(BOARDSIZE*BOARDSIZE + 1);
     int i;
@@ -116,6 +191,7 @@ char *serailize_board(char *board) {
     return seralized;
 }
 
+// TODO: We wont need this
 // TODO: We want to eliminate strings, struct -> bytes -> bytes -> struct eventually
 void send_board(int socket, game *g) {
     char payload[100];
@@ -130,94 +206,10 @@ void send_board(int socket, game *g) {
     free(serial_killer);
 }
 
-void initialize_player(game *g, int listen_sock, int client_socket, int max) {
-    // Set up game for client 
-    g->num_players++;
-    if (g->num_players == 1) 
-        send_board(client_socket, g);
-    else {
-        g->turn = 1;    // ????
-        g->status = 'S';  // >>>>?????
-        send_board(client_socket, g);
 
-        // I THink on the refactor we wont need this, we just send to all and 
-        // the client will understand from the protocol we send, no unique id or 
-        // number of players or random number 3 to dictate its knowledge
-        // Start game for first player that connected
-        for (int j=1; j<=max; ++j) 
-            if (j != listen_sock && j != client_socket) 
-                send_board(j, g);
-    }
-}
 
-/* Initial setup for the server, returns a socket listening to the local host 
- * at the port number provided. */
-int server_listen(const char *port) {
-    // Server stuff
-    printf("Configuring server address...\n");
-    struct addrinfo hints;
-    struct addrinfo *bind_address;
-
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;
-
-    if (getaddrinfo(0, port, &hints, &bind_address)) {
-        fprintf(stderr, "getaddrinfo failed (%d).\n", errno);
-        return -1;
-    }
-
-    printf("Creating a socket for clients to connect too...\n");
-    int socket_listen = socket(bind_address->ai_family, 
-                               bind_address->ai_socktype,
-                               bind_address->ai_protocol);
-    if (socket_listen < 0) {
-        fprintf(stderr, "socket failed (%d).\n", errno);
-        return -1;
-    }
-
-    if (bind(socket_listen, bind_address->ai_addr, bind_address->ai_addrlen)) {
-        fprintf(stderr, "bind failed (%d).\n", errno);
-        return -1;
-    }
-
-    freeaddrinfo(bind_address);
-
-    printf("Server listening for new connections...\n");
-    if (listen(socket_listen, 2) < 0) {
-        fprintf(stderr, "listen failed (%d).\n", errno);
-        return -1;
-    }
-
-    return socket_listen;
-}
-
-int server_accept(int listen_sock, fd_set *master, int *max) {
-    // Setup the new client
-    printf("New client connected, setting up socket...\n");
-    struct sockaddr client_address;
-    socklen_t client_len = sizeof(client_address);
-    int client_socket = accept(listen_sock, 
-                               (struct sockaddr*)&client_address, &client_len);
-
-    if (client_socket < 0) {
-        fprintf(stderr, "accept failed (%d).\n", errno);
-        return -1;
-    }
-    // Add the client to the master socket set
-    FD_SET(client_socket, master);
-    if (client_socket > *max) *max = client_socket;
-
-    char addrbuf[100], portbuf[100];
-    getnameinfo((struct sockaddr*)&client_address, client_len, 
-                addrbuf, sizeof(addrbuf), portbuf, sizeof(portbuf),
-                NI_NUMERICHOST | NI_NUMERICSERV);
-    printf("Client connected from address %s:%s\n", addrbuf, portbuf);
-    
-    return client_socket;
-}
-
-// MUTATES GAME STILL
+// PROTOCOL & GAME LAYERS
+// This will deal with recieving a player message and mutating game state.
 void handle_client_req(game *g, int listen_sock, int fd, fd_set *master, int max) {
     char buf[5];
     int bytes = recv(fd, buf, sizeof buf-1, 0);
@@ -251,7 +243,33 @@ void handle_client_req(game *g, int listen_sock, int fd, fd_set *master, int max
             send_board(i, g);
 }
 
-int run_server(game *g, int listen_sock) {
+// THIS IS BORKEN NOW
+// TODO: Unsure about this
+void initialize_player(game *g, int listen_sock, int client_socket, int max) {
+    g->players;
+    if (g->players == 1) 
+        send_board(client_socket, g);
+    else {
+        g->turn = 1;    // ????
+        g->status = 'S';  // >>>>?????
+        send_board(client_socket, g);
+
+        // I Think on the refactor we wont need this, we just send to all and 
+        // the client will understand from the protocol we send, no unique id or 
+        // number of players or random number 3 to dictate its knowledge
+        // Start game for first player that connected
+        for (int j=1; j<=max; ++j) 
+            if (j != listen_sock && j != client_socket) 
+                send_board(j, g);
+    }
+}
+
+// Main loop for a game, should compose network and game calls together.
+int run_server(int listen_sock) {
+    game g;
+    init_game(&g);
+
+    // TODO: Consider moving fd set, max socket to a struct for cleaner mngmt
     fd_set master;
     FD_ZERO(&master);
     FD_SET(listen_sock, &master);
@@ -268,11 +286,13 @@ int run_server(game *g, int listen_sock) {
             if (!FD_ISSET(fd, &read_fds)) continue;
 
             if (fd == listen_sock) { 
-                int new_client = server_accept(listen_sock, &master, &max_sock);
-                initialize_player(g, listen_sock, new_client, max_sock);
+                int new_client = server_accept(listen_sock);
+                FD_SET(new_client, &master);
+                if (new_client > max_sock) max_sock = new_client;
+                initialize_player(&g, listen_sock, new_client, max_sock);
             }
             else 
-                handle_client_req(g, listen_sock, fd, &master, max_sock);
+                handle_client_req(&g, listen_sock, fd, &master, max_sock);
         }
     }
 }
@@ -289,12 +309,29 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    game g;
-    init_game(&g);
-    int server_exit = run_server(&g, socket_listen);
+    int server_exit = run_server(socket_listen);
     if (server_exit < 0) {
         printf("run_server crashed");
         return 1;
     }
     return 0;
 }
+
+// Server setup
+// Waits for two clients 
+  // Client one connects 
+    // Sends waiting for opponent 
+  // Client two connects 
+  
+  // Sends to both clients that games is ready
+  
+// Both clients recieve game state 
+  // Client one can only move 
+  // Sends response to server 
+// If incorrect, sends back to client one to try again 
+// If correct, mutate interal gamestate 
+// Both clients recieve new game state 
+
+// Repeat until termination
+// Reset game state 
+// Disconnect both players.
