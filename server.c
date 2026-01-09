@@ -102,20 +102,20 @@ ssize_t recv_all(int sock, void *buf, size_t len) {
 #define BOARDSIZE 3
 
 // Holds instance of game.
-typedef struct game {
+typedef struct gameState {
     // Might want an int array or malloc a char array here instead... unsure.
     int status;
     int turn;
-    int *players[2];
+    int players[2];
     char *board;
-} game;
+} gameState;
 
 // TODO: Initialize game correctly
-void init_game(game *g) {
-    g->board = malloc(sizeof(char)*BOARDSIZE*BOARDSIZE);
-    g->turn = 0;
-    g->status = 0;
-    memset(&g->players, 0, sizeof(g->players));
+void init_game(gameState *game) {
+    game->board = malloc(sizeof(char)*BOARDSIZE*BOARDSIZE);
+    game->turn = 0;
+    game->status = 0;
+    memset(&game->players, 0, sizeof(game->players));
 }
 
 // TODO: LOGIC IS BROKEN
@@ -166,10 +166,13 @@ void print_board(char *board) {
 
 void mutate_game_state(void) { }
 
-void reset_game(game *g) {
-    memset(&g->board, 0, sizeof(g->board));
-    g->num_players--;
-    g->turn = 0;
+// Free the client socket we assigned for game->player
+void reset_game(gameState *game, int fd) {
+    memset(&game->board, 0, sizeof(game->board));
+    // Cleaner way please 
+    if (game->players[0] == fd) game->players[0] = 0;
+    else game->players[1] = 0;
+    game->turn = 0;
 }
 
 // ----------------------------PROTOCOL  LAYER---------------------------------
@@ -181,42 +184,36 @@ typedef struct message {
     uint8_t board[9];
 } message;
 
-// TODO: We wont need this 
-char *serailize_board(char *board) {
-    char *seralized = malloc(BOARDSIZE*BOARDSIZE + 1);
-    int i;
-    for (i = 0; i < BOARDSIZE*BOARDSIZE; i++)
-        seralized[i] = '0' + board[i];
-    seralized[i] = '\0';
-    return seralized;
-}
-
-// TODO: We wont need this
-// TODO: We want to eliminate strings, struct -> bytes -> bytes -> struct eventually
-void send_board(int socket, game *g) {
-    char payload[100];
-    char *serial_killer = serailize_board(g->board);
-    int payload_len = snprintf(payload, sizeof(payload), 
-                               "STATUS=%c TURN=%d BOARD=%s", 
-                               g->status, g->turn, serial_killer);
-
-    uint32_t header = htonl(payload_len);
+void send_message(int socket, message *msg) {
+    size_t message_len = sizeof(*msg);
+    uint32_t header = htonl(message_len);
     send_all(socket, &header, sizeof header);
-    send_all(socket, payload, payload_len);
-    free(serial_killer);
+    send_all(socket, msg, message_len);
 }
 
+/* Game state to message converter*/
+void convert_to_bytes(gameState *game, int client_socket) {
+    message msg;
+    msg.status = game->status;
+    msg.turn = game->turn;
 
+    // Assigning who a player is via socket
+    if (game->players[0] == client_socket) msg.you = 1;
+    else msg.you = 2;
+
+    memcpy(msg.board, game->board, 9);
+    send_message(client_socket, &msg);
+}
 
 // PROTOCOL & GAME LAYERS
 // This will deal with recieving a player message and mutating game state.
-void handle_client_req(game *g, int listen_sock, int fd, fd_set *master, int max) {
+void handle_client_req(gameState *game, int fd, fd_set *master) {
     char buf[5];
     int bytes = recv(fd, buf, sizeof buf-1, 0);
     buf[bytes] = '\0';
     if (bytes < 1) {
         printf("Client has disconnected.\n");
-        reset_game(g);
+        reset_game(game, fd);
         FD_CLR(fd, master);
         close(fd);
     }
@@ -225,49 +222,45 @@ void handle_client_req(game *g, int listen_sock, int fd, fd_set *master, int max
     int r, c;
 
     // Return straight away if invalid move.
-    if (!is_valid(g->board, buf, &r, &c)) {
+    if (!is_valid(game->board, buf, &r, &c)) {
         printf("Move is invalid, try again\n");
-        send_board(fd, g);
+        // send_board(fd, game);
         return;
     }
 
     // Mutate the board with the players move
-    g->board[r*BOARDSIZE + c] = g->turn;
-    print_board(g->board);
+    game->board[r*BOARDSIZE + c] = game->turn;
+    print_board(game->board);
 
-    if (gameover(g->board)) g->status = 'F';        // Finished
-    else g->turn = (g->turn == 1) ? 2 : 1;          // Switch player turn
+    if (gameover(game->board)) game->status = 'F';        // Finished
+    else game->turn = (game->turn == 1) ? 2 : 1;          // Switch player turn
 
-    for (int i=0; i<=max; ++i) 
-        if (i != listen_sock) 
-            send_board(i, g);
+    // send to both players
+    for (int i=0; i<2; ++i) 
+        convert_to_bytes(game, game->players[i]);
 }
 
-// THIS IS BORKEN NOW
-// TODO: Unsure about this
-void initialize_player(game *g, int listen_sock, int client_socket, int max) {
-    g->players;
-    if (g->players == 1) 
-        send_board(client_socket, g);
+/* Initializes both players and starts the game once two players are present*/
+void initialize_player(gameState *game, int client_socket) {
+    if (!game->players[0]) {
+        game->players[0] = client_socket;
+        game->status = 'W';                            // Wait
+        game->turn = 0;
+        convert_to_bytes(game, client_socket);        
+    }
     else {
-        g->turn = 1;    // ????
-        g->status = 'S';  // >>>>?????
-        send_board(client_socket, g);
-
-        // I Think on the refactor we wont need this, we just send to all and 
-        // the client will understand from the protocol we send, no unique id or 
-        // number of players or random number 3 to dictate its knowledge
-        // Start game for first player that connected
-        for (int j=1; j<=max; ++j) 
-            if (j != listen_sock && j != client_socket) 
-                send_board(j, g);
+        game->players[1] = client_socket;
+        game->turn = 1;   
+        game->status = 'S';                            // Start
+        convert_to_bytes(game, game->players[1]);        
+        convert_to_bytes(game, game->players[0]);        
     }
 }
 
 // Main loop for a game, should compose network and game calls together.
 int run_server(int listen_sock) {
-    game g;
-    init_game(&g);
+    gameState game;
+    init_game(&game);
 
     // TODO: Consider moving fd set, max socket to a struct for cleaner mngmt
     fd_set master;
@@ -289,10 +282,10 @@ int run_server(int listen_sock) {
                 int new_client = server_accept(listen_sock);
                 FD_SET(new_client, &master);
                 if (new_client > max_sock) max_sock = new_client;
-                initialize_player(&g, listen_sock, new_client, max_sock);
+                initialize_player(&game, new_client);
             }
             else 
-                handle_client_req(&g, listen_sock, fd, &master, max_sock);
+                handle_client_req(&game, fd, &master);
         }
     }
 }
@@ -316,22 +309,3 @@ int main(int argc, char **argv) {
     }
     return 0;
 }
-
-// Server setup
-// Waits for two clients 
-  // Client one connects 
-    // Sends waiting for opponent 
-  // Client two connects 
-  
-  // Sends to both clients that games is ready
-  
-// Both clients recieve game state 
-  // Client one can only move 
-  // Sends response to server 
-// If incorrect, sends back to client one to try again 
-// If correct, mutate interal gamestate 
-// Both clients recieve new game state 
-
-// Repeat until termination
-// Reset game state 
-// Disconnect both players.
