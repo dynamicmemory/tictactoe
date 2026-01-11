@@ -33,7 +33,7 @@ ssize_t send_all(int sock, const void *buf, size_t len) {
 }
 
 /* Debugging purposes, prints a board to teh cli */
-void print_board(char *board) {
+void print_board(int *board) {
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < 3; j++) {
             printf("%d", board[i*BOARDSIZE + j] - '0');
@@ -93,49 +93,19 @@ int handle_server_req(int server_sock) {
     // Game protocol message from the server
     printf("%.*s\n", len, buf);
 
-    // STATUS=x PLAYERS=x YOU=x TURN=x BOARD=x
-    int ecount = 0;
-    char status;
-    int you;
-    int turn;
-    char *board;
+    int status = buf[0];
+    int you = buf[1];
+    int turn = buf[2];
+    // int board[9] = buf[3];
 
-    for (int j=0; j<len; ++j) {
-        if (buf[j] == '='){
-            ++ecount;
-            if (ecount == 1) {
-                status = buf[++j];
-                continue;
-            }
-
-            if (ecount == 2) {
-                int temp = buf[++j] - '0';
-                if (temp == 3) {
-                    printf("buffer sent turn is 3 so %d with be %d\n", you, you);
-                }
-                else 
-                    you = temp;
-                continue;
-            }
-            if (ecount == 3) {
-                turn = buf[++j] - '0';
-                continue;
-            }
-            if (ecount == 4) {
-                board = &buf[++j];
-                printf("%s", board);
-                break;
-            }
-        }
-    }
-
+    printf("status:%d, you:%d, turn:%d\n", status, you, turn);
     // CHECKING GAME STATE FROM REIVED SERVER MESSAGE
     // Only display board once both players have joined and game has started
-    if (status != 'N') {
-        printf("\n");
-        print_board(board);
-        printf("\n");
-    }
+    // if (status == 'S') {
+    //     printf("\n");
+        // print_board(board);
+    //     printf("\n");
+    // }
 
     // IF GAME OVER; END ELSE; RETURN INPUT TO SERVER FOR MOVE.
     if (status == 'F') {
@@ -164,7 +134,7 @@ int run_client(int server_sock) {
     fd_set master;
     FD_ZERO(&master);
     FD_SET(server_sock, &master);
-    FD_SET(0, &master);
+    // FD_SET(0, &master);
 
     // struct timeval timeout;
     // timeout.tv_sec = 0;
@@ -177,13 +147,17 @@ int run_client(int server_sock) {
             return -1;
         }
 
-        if (FD_ISSET(0, &read_fds)) {
-            int i = 0;
-        }
+        // if (FD_ISSET(0, &read_fds)) {
+        //     int i = 0;
+        // }
 
         // Recieved server message 
-        if (FD_ISSET(server_sock, &read_fds))
-            handle_server_req(server_sock);
+        if (FD_ISSET(server_sock, &read_fds)) {
+            int ret = handle_server_req(server_sock);
+            if (ret < 0) break;
+        }
+            
+            
     }
     return 0;
 }

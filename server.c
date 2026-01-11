@@ -139,12 +139,14 @@ int gameover(char *b) {
     return 0;
 }
 
-/* Chcks a coordinate for valid move */
-int is_valid(char *b, char *bytes, int *r, int *c) {
-    *r = bytes[0] - '0' - 1;
-    *c = bytes[1] - '0' - 1;
+/* Chcks a coordinate for valid move 
+ * Returns 0 for invalid, 1 for valid*/
+int is_valid(char *b, int *bytes, int *r, int *c) {
+    // -1 for the 0 idx offset. User will input 1,2 or 3, array idx are 0,1,2
+    *r = bytes[1] - '0' - 1;
+    *c = bytes[2] - '0' - 1;
 
-    if (*r > BOARDSIZE && *c > BOARDSIZE) {
+    if (*r > BOARDSIZE || *r < BOARDSIZE || *c > BOARDSIZE || *c < BOARDSIZE) {
         fprintf(stderr, "input was not between 1 - 3.\n");
         return 0;
     }
@@ -170,8 +172,11 @@ void mutate_game_state(void) { }
 void reset_game(gameState *game, int fd) {
     memset(&game->board, 0, sizeof(game->board));
     // Cleaner way please 
-    if (game->players[0] == fd) game->players[0] = 0;
-    else game->players[1] = 0;
+    memset(&game->players, 0, BOARDSIZE*BOARDSIZE);
+    // If i want to keep the other play i need to do the below, but also remake
+    // Initialize to ensure we start a game correctly again as players[] is wrong
+    // if (game->players[0] == fd) game->players[0] = 0;
+    // else game->players[1] = 0;
     game->turn = 0;
 }
 
@@ -207,25 +212,39 @@ void convert_to_bytes(gameState *game, int client_socket) {
 
 // PROTOCOL & GAME LAYERS
 // This will deal with recieving a player message and mutating game state.
-void handle_client_req(gameState *game, int fd, fd_set *master) {
-    char buf[5];
-    int bytes = recv(fd, buf, sizeof buf-1, 0);
-    buf[bytes] = '\0';
-    if (bytes < 1) {
-        printf("Client has disconnected.\n");
+int handle_client_req(gameState *game, int fd, fd_set *master) {
+
+    // Return immediatly if non player turn tried to make a move.
+    if (game->players[game->turn] != fd)
+        return 0;
+
+    uint32_t header;
+    recv_all(fd, &header, sizeof header);
+    if (header < 1) {
+        printf("Client has disconnected\n");
+        return 0;
+    }
+
+    uint32_t len = ntohl(header);
+    int buf[len];
+    if (recv_all(fd, buf, len) < 1) {
+        printf("Client has disconnected\n");
         reset_game(game, fd);
         FD_CLR(fd, master);
         close(fd);
+        return 0;
     }
 
-    printf("%.*s\n", bytes, buf);
-    int r, c;
+    for (int i=0; i<len; i++) 
+        printf("%d", buf[i]);
+    printf("\n");
 
+    int r, c;
     // Return straight away if invalid move.
     if (!is_valid(game->board, buf, &r, &c)) {
         printf("Move is invalid, try again\n");
-        // send_board(fd, game);
-        return;
+        convert_to_bytes(game, fd);
+        return 0;
     }
 
     // Mutate the board with the players move
@@ -233,11 +252,13 @@ void handle_client_req(gameState *game, int fd, fd_set *master) {
     print_board(game->board);
 
     if (gameover(game->board)) game->status = 'F';        // Finished
-    else game->turn = (game->turn == 1) ? 2 : 1;          // Switch player turn
+    else game->turn = (game->turn == 0) ? 1 : 0;          // Switch player turn
 
     // send to both players
     for (int i=0; i<2; ++i) 
         convert_to_bytes(game, game->players[i]);
+
+    return 0;
 }
 
 /* Initializes both players and starts the game once two players are present*/
@@ -284,8 +305,13 @@ int run_server(int listen_sock) {
                 if (new_client > max_sock) max_sock = new_client;
                 initialize_player(&game, new_client);
             }
-            else 
-                handle_client_req(&game, fd, &master);
+            else {
+                // NOTE: Currently always returns 0
+                int ret = handle_client_req(&game, fd, &master);
+                if (ret < 0)
+                    // No error handling implemented yet.
+                    continue;
+            }
         }
     }
 }
