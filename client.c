@@ -1,3 +1,6 @@
+// The client in C was never optimized as I planned on building the client in 
+// python, I ended up prototyping it in C alongside the client and building it 
+// in python afterwards... strange order haha.
 #include <stdio.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -6,6 +9,14 @@
 #include <string.h>
 #include <stdint.h>
 
+#define STATUS_WAIT 'W'
+#define STATUS_ACTIVE 'A'
+#define STATUS_DISCONNECT 'D'
+#define STATUS_TIE 'T'
+#define STATUS_FINISH 'F'
+
+/* Creates a TCP socket and connects to a server at the given host and port 
+ * Returns the server socket on success and -1 on failure*/
 int connect_to_server(const char *host, const char *port) {
     printf("Configuring host address...\n");
     struct addrinfo hints;
@@ -16,7 +27,7 @@ int connect_to_server(const char *host, const char *port) {
     struct addrinfo *server_address;
     if (getaddrinfo(host, port, &hints, &server_address)) {
         fprintf(stderr, "getaddrinfo failed (%d).\n", errno);
-        return 1;
+        return -1;
     }
     
     int server_socket = socket(server_address->ai_family, 
@@ -24,18 +35,21 @@ int connect_to_server(const char *host, const char *port) {
                                server_address->ai_protocol);
     if (server_socket < 0) {
         fprintf(stderr, "socket failed (%d).\n", errno);
-        return 1;
+        return -1;
     }
 
     if (connect(server_socket, server_address->ai_addr, server_address->ai_addrlen)) {
         fprintf(stderr, "connect failed (%d).\n", errno);
-        return 1;
+        return -1;
     }
     printf("Connected to %s:%s\n", host, port);
     freeaddrinfo(server_address);
     return server_socket;
 }
 
+/* Sends exactly 'len' bytes over a socket, handles partial sends to ensure 
+ * full message buffer is sent.
+ * Returns: the total bytes sent on success or -1 on fail.*/
 ssize_t send_all(int socket, const void *buf, size_t len) {
     size_t total = 0;
     const char *p = buf;
@@ -48,6 +62,10 @@ ssize_t send_all(int socket, const void *buf, size_t len) {
     return total;
 }
 
+/* Recieves exactly 'len' bytes over a socket, handles partial reads to ensure 
+ * full message is recieved into the buffer 
+ * Returns: the total bytes read in on success or -1 on failure
+ */
 ssize_t recv_all(int sock, void *buf, size_t len) {
     size_t total = 0;
     char *p = buf;
@@ -60,6 +78,7 @@ ssize_t recv_all(int sock, void *buf, size_t len) {
     return total;
 } 
 
+/* Prints a 3 by 3 Tic-Tac-Toe board to stdout*/
 void print_game(uint8_t *board) {
     for(int row=0; row<3; row++) { 
         for(int col=0; col<3; col++) 
@@ -68,6 +87,12 @@ void print_game(uint8_t *board) {
     }
 }
 
+/* Handles an incoming message from the server
+ * Recieves a 4 byte header indicating the message length incoming next 
+ * Recieves the message from the server 
+ * Parses game status, turn, player and board 
+ * Prints the board and message, and prompts the client for their turn
+*/
 int handle_server_req(int server_socket) {
     uint32_t server_header;
     if (recv_all(server_socket, &server_header, sizeof(server_header)) < 1) {
@@ -90,28 +115,51 @@ int handle_server_req(int server_socket) {
 
     printf("\n");
     printf("status: %c, turn: %d, you: %d\n", status, turn, you);
-    // printf("%c %c %c\n", buf[0], buf[1], buf[2]);
-    // printf("%c %c %c\n", buf[3], buf[4], buf[5]);
-    // printf("%c %c %c\n", buf[6], buf[7], buf[8]);
-    // printf("\n");
-
-    // for (int i=0; i<len; i++){
-    //     printf("%c ",board[i]);
-    // }
     print_game(board);
     printf("\n");
 
-    printf("Enter a message to the server \n");
-    char input[1024];
-    if (!fgets(input, sizeof input, stdin)) {}
+    if (status == STATUS_FINISH) {
+        if (turn == you) {
+            printf("Game over - You won!\n");
+            return -1;
+        }
+        else {
+            printf("Game over - You Lost!\n");
+            return -1;
+        }
+    }
 
-    uint32_t header = htonl(strlen(input));
-    send_all(server_socket, &header, sizeof header);
-    send_all(server_socket, input, strlen(input));
+    if (status == STATUS_TIE) {
+        printf("Game over - It was a tied!\n");
+        return -1;
+    }
+
+    if (status == STATUS_DISCONNECT) {
+        printf("Opponent Disconnected, you win by default!\n");
+        return -1;
+    }
+
+    if (status == STATUS_WAIT) {
+        printf("Waiting for an opponent to join.\n");
+        return 0;
+    }
+    
+    if (you == turn) {
+        printf("Enter a message to the server \n");
+        char input[1024];
+        if (!fgets(input, sizeof input, stdin)) {}
+
+        uint32_t header = htonl(strlen(input));
+        send_all(server_socket, &header, sizeof header);
+        send_all(server_socket, input, strlen(input));
+    }
+    else 
+        printf("Waiting for opponent to make a move\n");
 
     return 0;
 }
 
+/* Entry point for the client, runs the main loop for the clients game*/
 int main(int argc, char **argv) {
     if (argc < 3) {
         fprintf(stderr, "usage: ./client <hostname> <portnumber>\n");
@@ -124,7 +172,7 @@ int main(int argc, char **argv) {
 
     fd_set master;
     FD_ZERO(&master);
-    FD_SET(0, &master);
+    // FD_SET(0, &master);
     FD_SET(server_sock, &master);
 
     struct timeval timeout;
@@ -140,9 +188,9 @@ int main(int argc, char **argv) {
         }
 
         // may not use, instead reply to server inside the req itself
-        if (FD_ISSET(0, &read_fds)) {
-            // User input
-        }
+        // if (FD_ISSET(0, &read_fds)) {
+        //     // User input
+        // }
 
         if (FD_ISSET(server_sock, &read_fds)) {
             if (handle_server_req(server_sock) < 0) break;

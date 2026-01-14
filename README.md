@@ -1,51 +1,74 @@
-# Networked Tic-Tac-Toe (C)
+# Networked Tic-Tac-Toe (C & Python)
 
-This repository contains a **work-in-progress refactor** of a networked Tic-Tac-Toe server and client written in C.
+This repository contains a **Somewhat finished** networked Tic-Tac-Toe implementation with a C server, C client, and a Python client.
 
-The goal of this project is **not** to ship a polished game.  
-The goal is to learn and practice **network server architecture**, specifically:
+The goal of this project is **not** to ship a commercial game.  
+The goal is to provide a **working, cross-language example of network server architecture**:
 
 - Socket lifecycle management
 - Event-loop–driven servers (`select`)
-- Separation of concerns (transport vs logic)
-- Incremental refactoring away from “everything in `main`”
-- Preparing the codebase for future protocol hardening and security work
+- Binary protocol design
+- Server-authoritative game state
+- Cross-language client compatibility (C and Python)
 
 ---
 
 ## Current State
 
-This codebase is intentionally **mid-refactor**.
-
-What has been done:
-- Socket setup extracted into `server_listen`
-- Accept logic extracted into `server_accept`
-- Client handling extracted into `server_handle_client`
+### C Server
+- Handles multiple clients using `select`
+- Binary protocol for sending game state
 - Event loop isolated in `run_server`
-- Client connection logic extracted from `main`
+- Game state management via `GameState` struct
+- Fully functional Tic-Tac-Toe logic with turn enforcement
 
-What is **not done yet** (by design):
-- Proper protocol framing (currently string-based)
-- Per-client state structs
-- Server-authoritative turn enforcement
-- Robust input validation
-- Security features (authentication, rate limiting, etc.)
-- Clean separation between networking and game logic
+### C Client
+- Connects to server using TCP
+- Sends moves as two-character strings (`"rowcol"`)
+- Receives game state as a **binary message** with a 4-byte header
 
-If you’re looking for “best practices”, this repo is **about learning why they exist**, not showcasing them.
+### Python Client
+- Connects to the same server using TCP
+- Follows the **same binary protocol** as the C client
+- Implements a read–eval–send loop
+- Prints the board to terminal and prompts for moves
+- Fully compatible with server
+
+---
+
+## Protocol
+
+The protocol is **binary** with a **4-byte big-endian length header** followed by a payload:
+
+[4-byte big-endian length][payload]
+
+The payload consists of:
+
+- 1 byte: `status` (`W`, `A`, `F`, `T`, `D`)
+- 1 byte: `turn` (1 or 2)
+- 1 byte: `player` (1 or 2)
+- 9 bytes: `board` (values 0–2 for empty / player markers)
+
+Moves sent from client to server are **2-byte ASCII strings**:  
+`"11"` → row 1, column 1  
 
 ---
 
 ## Build
 
-### Server
+### C Server
 ```sh
-gcc -Wall -Wextra -o server server.c 
-```
+gcc -Wall -Wextra -o server server.c
 
-### Client 
+### C Client 
 ```sh
 gcc -Wall -Wextra -o client client.c
+```
+
+### Python Client
+Requires Python 3.10+ (for `socket | None` typing)
+```sh
+python3 client.py <hostname> <portnumber>
 ```
 
 ## RUN 
@@ -60,63 +83,57 @@ Connect clients:
 ./client localhost 8080 
 ```
 
+Python client:
+```sh 
+python3 client.py localhost 8080 
+```
+
 Two clients are expected.
 
-## Architecture (So Far)
+## Architecture
 
-High-level structure (still evolving):
+High-level structure:
 
 ### Transport
-- `server_listen`
-- `server_accept`
+- `setup_server_socket` / `connect_to_server`
 
 ### Event Loop
-- `run_server`
+- `run_server` (server-side only)
 
 ### Connection Handling
-- `server_handle_client`
+- `accept_client` / `handle_client_request`
 
 ### Game Logic
-- Currently global and intentionally marked for extraction
+- `GameState` struct (C)
+- Python client mirrors server state to render board
 
-This project is being refactored toward a layered design where:
-
-- The event loop does not know game rules
-- The server is authoritative over game state
-- Clients are treated as untrusted input sources
+**Key points:**
+- Event loop does **not** know game rules
+- Server is authoritative over game state
+- Clients are treated as **untrusted input sources**
+- Fully functional binary protocol ensures cross-language communication
 
 ---
 
 ## Why This Exists
 
-This project exists to break bad habits early:
+This project exists to demonstrate:
 
-- Stuffing all logic into `main`
-- Treating sockets as players
-- Conflating networking with application logic
-- Hand-waving “security” instead of designing for it
+- Event-loop driven networking
+- Server-authoritative game logic
+- Cross-language binary protocol
+- Clean separation of networking and game logic
 
-Each refactor step is deliberate and educational.
-
----
-
-## Roadmap
-
-Planned next steps:
-
-- Introduce per-client state structures
-- Define a minimal binary protocol
-- Move game state into an explicit game module
-- Enforce server-side turn ownership
-- Add basic hardening (validation, rate limits)
-- Compare C vs C++ designs using the same architecture
+It is **educational**, not commercial.
 
 ---
 
-## Disclaimer
+## Roadmap / Optional Improvements
 
-This code is **not** production-ready.  
-It is **not** secure.  
-It is **not** idiomatic yet.
+While the current implementation is fully functional, possible enhancements include:
 
-
+- More robust input validation
+- Optional GUI client
+- Extended protocol messages (e.g., chat, lobby system)
+- Security hardening and authentication
+- Logging and debugging utilities
